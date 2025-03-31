@@ -6,8 +6,11 @@ import (
 	"LLM-Chat/models/entities"
 	"LLM-Chat/models/llm"
 	"LLM-Chat/utils"
+	"bytes"
 	"fmt"
 	"github.com/gin-gonic/gin"
+	"github.com/milvus-io/milvus/client/v2/entity"
+	"github.com/milvus-io/milvus/client/v2/milvusclient"
 	"gorm.io/datatypes"
 	"log"
 	"net/http"
@@ -20,6 +23,8 @@ type llmMsg struct {
 	Role string `json:"role"`
 	Text string `json:"text"`
 }
+
+const contextPrompt = "Use the following context as your learned knowledge, inside <context></context> XML tags.\n\n<context>\n{{#context#}}\n</context>\n\nWhen answer to user:\n- If you don't know, just say that you don't know.\n- If you don't know when you are not sure, ask for clarification.\nAvoid mentioning that you obtained the information from the context.\nAnd answer according to the language of the user's question.\n\n"
 
 func ChatCompletion(c *gin.Context) {
 	writer := c.Writer
@@ -45,10 +50,21 @@ func ChatCompletion(c *gin.Context) {
 		return
 	}
 
+	sysPrompt := "You are a helpful assistant"
+	if req.DocumentId != nil {
+		// mock
+		cnt, promoptContext := loadChatContext(c, req.Msg, req.DocumentId)
+		if cnt > 0 {
+			params := map[string]string{
+				"context": promoptContext,
+			}
+			sysPrompt = sysPrompt + "\n\n" + utils.ReplacePlaceholders(contextPrompt, params)
+		}
+	}
 	chatReq := llm.NewChatRequest()
 	msgs := []llm.Message{
 		{
-			Content: "You are a helpful assistant",
+			Content: sysPrompt,
 			Role:    "system",
 		},
 	}
@@ -75,7 +91,7 @@ func ChatCompletion(c *gin.Context) {
 
 	// 追加用户输入
 	msgs = append(msgs, llm.Message{
-		Content: req.Msg,
+		Content: *req.Msg,
 		Role:    "user",
 	})
 
@@ -149,7 +165,7 @@ func saveMessage(chatReq models.ChatRequest, messages []llm.Message, chunks []ll
 		OverrideModelConfigs:    "",
 		ConversationID:          chatReq.ConversationId,
 		Inputs:                  datatypes.JSON("{}"),
-		Query:                   chatReq.Msg,
+		Query:                   *chatReq.Msg,
 		Message:                 utils.StructToDatatypesJSON(messages),
 		MessageTokens:           0,
 		MessageUnitPrice:        0,
@@ -168,4 +184,46 @@ func saveMessage(chatReq models.ChatRequest, messages []llm.Message, chunks []ll
 	}
 	log.Println("save" + utils.MarshalString(msg))
 	config.DB.Save(&msg)
+}
+
+func loadChatContext(ctx *gin.Context, msg *string, documentId *string) (int, string) {
+	log.Println("loadChatContext:" + *documentId)
+
+	cli := config.MilvusCli
+
+	// mock
+	embeddings, _ := GenEmbedding([]string{*msg})
+	embedding := embeddings[0].Embedding
+	const collectionName = "my_rag_collection"
+
+	searchOpt := milvusclient.NewSearchOption(
+		collectionName, // collectionName
+		5,              // limit
+		[]entity.Vector{entity.FloatVector(embedding)},
+	).
+		WithOutputFields("id", "vector", "text")
+	resultSets, err := cli.Search(ctx, searchOpt)
+	if err != nil {
+		log.Fatal("failed to perform basic ANN search collection: ", err.Error())
+	}
+
+	var contextStr bytes.Buffer
+	cnt := 0
+	for _, resultSet := range resultSets {
+		var data []*llm.Chunk
+		err := resultSet.Fields.Unmarshal(&data)
+		if err != nil {
+			log.Fatal(err)
+			return cnt, contextStr.String()
+		}
+		for _, chunk := range data {
+			contextStr.WriteString(chunk.Text)
+			cnt++
+		}
+	}
+	if cnt > 0 {
+		return cnt, contextStr.String()
+	} else {
+		return cnt, ""
+	}
 }

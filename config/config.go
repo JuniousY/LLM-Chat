@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/joho/godotenv"
+	"github.com/milvus-io/milvus/client/v2/milvusclient"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -14,6 +15,8 @@ import (
 )
 
 var DB *gorm.DB
+var RedisCli *redis.Client
+var MilvusCli *milvusclient.Client
 
 func InitConfig() {
 	err := godotenv.Load()
@@ -23,10 +26,11 @@ func InitConfig() {
 
 	connectMySQL()
 	connectRedis()
+	connectMilvus()
 }
 
 // MySQL
-func connectMySQL() (*gorm.DB, error) {
+func connectMySQL() *gorm.DB {
 	// 从环境变量读取配置
 	mysqlHost := os.Getenv("MYSQL_HOST")
 	mysqlPort := os.Getenv("MYSQL_PORT")
@@ -41,7 +45,7 @@ func connectMySQL() (*gorm.DB, error) {
 	// 连接 MySQL
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
-		return nil, err
+		return nil
 	}
 
 	fmt.Println("✅ MySQL 连接成功！")
@@ -56,11 +60,11 @@ func connectMySQL() (*gorm.DB, error) {
 	sqlDB.SetConnMaxLifetime(time.Hour) // 连接的最大存活时间（默认无限制）
 
 	DB = db
-	return db, nil
+	return db
 }
 
 // Redis
-func connectRedis() (*redis.Client, error) {
+func connectRedis() *redis.Client {
 	redisHost := os.Getenv("REDIS_HOST")
 	redisPort := os.Getenv("REDIS_PORT")
 	redisPassword := os.Getenv("REDIS_PASSWORD")
@@ -77,8 +81,27 @@ func connectRedis() (*redis.Client, error) {
 	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
 	_, err := client.Ping(ctx).Result()
 	if err != nil {
-		return nil, err
+		return nil
 	}
+	RedisCli = client
 
-	return client, nil
+	return client
+}
+
+func connectMilvus() *milvusclient.Client {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	milvusAddr := os.Getenv("MILVUS_HOST")
+
+	cli, err := milvusclient.New(ctx, &milvusclient.ClientConfig{
+		Address: milvusAddr,
+	})
+
+	if err != nil {
+		fmt.Println(err)
+		// handle error
+	}
+	MilvusCli = cli
+	return cli
 }
